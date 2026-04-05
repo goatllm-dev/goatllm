@@ -1,0 +1,177 @@
+{
+  "name": "goatllm-vscode",
+  "displayName": "GoatLLM — Local AI Coding Assistant",
+  "description": "Chat with local open-source LLMs (MLX, Ollama, LM Studio, llama.cpp, exo) — fully local, no accounts, OpenAI-compatible",
+  "version": "0.1.0",
+  "publisher": "goatllm",
+  "license": "MIT",
+  "icon": "media/goatllm-icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "goatllm",
+    "local llm",
+    "mlx",
+    "ollama",
+    "llama.cpp",
+    "lm studio",
+    "exo",
+    "open source ai",
+    "privacy",
+    "offline"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "goatllm-chat",
+          "title": "GoatLLM",
+          "icon": "media/goatllm-sidebar.svg"
+        }
+      ]
+    },
+    "views": {
+      "goatllm-chat": [
+        {
+          "type": "webview",
+          "id": "goatllm.chatView",
+          "name": "GoatLLM"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "goatllm.addEndpoint",
+        "title": "GoatLLM: Add Endpoint"
+      },
+      {
+        "command": "goatllm.removeEndpoint",
+        "title": "GoatLLM: Remove Endpoint"
+      },
+      {
+        "command": "goatllm.selectEndpoint",
+        "title": "GoatLLM: Select Endpoint"
+      },
+      {
+        "command": "goatllm.detectLocalServers",
+        "title": "GoatLLM: Detect Local Servers"
+      },
+      {
+        "command": "goatllm.selectModel",
+        "title": "GoatLLM: Select Model"
+      },
+      {
+        "command": "goatllm.explainSelection",
+        "title": "GoatLLM: Explain Selection"
+      },
+      {
+        "command": "goatllm.generateCode",
+        "title": "GoatLLM: Generate Code"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "goatllm.explainSelection",
+          "group": "goatllm@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "goatllm.generateCode",
+          "group": "goatllm@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "GoatLLM",
+      "properties": {
+        "goatllm.endpoints": {
+          "type": "array",
+          "default": [
+            { "name": "MLX (local)", "baseUrl": "http://localhost:8013/v1", "apiKey": "" },
+            { "name": "Ollama (local)", "baseUrl": "http://localhost:11434/v1", "apiKey": "" },
+            { "name": "LM Studio (local)", "baseUrl": "http://localhost:1234/v1", "apiKey": "" },
+            { "name": "exo (local)", "baseUrl": "http://localhost:52415/v1", "apiKey": "" }
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Human-readable name" },
+              "baseUrl": { "type": "string", "description": "OpenAI-compatible base URL, e.g. http://localhost:8013/v1" },
+              "apiKey": { "type": "string", "description": "Optional — most local servers ignore this" }
+            },
+            "required": ["name", "baseUrl"]
+          },
+          "description": "OpenAI-compatible endpoints to connect to"
+        },
+        "goatllm.activeEndpoint": {
+          "type": "string",
+          "default": "MLX (local)",
+          "description": "Name of the currently active endpoint from goatllm.endpoints"
+        },
+        "goatllm.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Default model id (leave empty to pick from server's /v1/models list)"
+        },
+        "goatllm.temperature": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Temperature for AI responses (0 = deterministic, 2 = creative)"
+        },
+        "goatllm.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "description": "Max tokens to generate per response"
+        },
+        "goatllm.systemPrompt.chat": {
+          "type": "string",
+          "default": "",
+          "description": "Custom system prompt for Chat mode (leave empty for default)"
+        },
+        "goatllm.systemPrompt.agent": {
+          "type": "string",
+          "default": "",
+          "description": "Custom system prompt for Agent mode (leave empty for default)"
+        },
+        "goatllm.systemPrompt.agentFull": {
+          "type": "string",
+          "default": "",
+          "description": "Custom system prompt for Agent (Full Access) mode (leave empty for default)"
+        },
+        "goatllm.commandDenyList": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Additional command patterns to block in Agent modes (substring match, case-insensitive). Built-in deny list already blocks rm -rf /, sudo, mkfs, etc."
+        },
+        "goatllm.allowSudo": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow sudo commands in Agent modes (not recommended)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
