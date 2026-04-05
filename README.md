@@ -80,7 +80,3 @@ Because the best LLM is the one you can run locally, own completely, and doesn't
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## Related
-
-- **[xai-grok-plugin](https://github.com/xai)** — companion extension for Grok (xAI cloud API). Same chat/agent architecture, built first from scratch.
