@@ -11,13 +11,113 @@ import {
   executeToolCall,
   ToolExecutionResult,
 } from '../agent/tools';
+import { ToolCallExtractor } from '../agent/toolCallExtractor';
 
 const MAX_AGENT_ITERATIONS = 25;
 
-const DEFAULT_SYSTEM_PROMPTS: Record<string, string> = {
-  chat: `You are a helpful AI coding assistant running locally on the user's machine. You are helpful, concise, and accurate. When writing code, use markdown code blocks with the language specified. You are in Chat mode — answer questions and have conversations. Do not suggest file edits or terminal commands unless the user explicitly asks.`,
+/**
+ * Stop sequences sent on every request. These catch runaway generation when
+ * a local server's chat template doesn't emit a proper EOS token and the model
+ * starts hallucinating the next conversational turn as plain text.
+ */
+const DEFAULT_STOP_SEQUENCES = [
+  // Plain-text fake turns — with colon
+  '\nUSER:', '\nuser:', '\nHuman:', '\nHUMAN:',
+  '\nASSISTANT:', '\nassistant:', '\nmodel:', '\nMODEL:',
+  // Without colon (bare role label on its own line)
+  '\nUSER\n', '\nuser\n', '\nHuman\n', '\nHUMAN\n',
+  '\nASSISTANT\n', '\nassistant\n', '\nmodel\n', '\nMODEL\n',
+  // Model-family-specific end-of-turn tokens
+  '<end_of_turn>',          // Gemma
+  '<start_of_turn>',        // Gemma (next turn start)
+  '<|im_end|>',             // ChatML (Qwen, Yi, Mistral derivatives)
+  '<|eot_id|>',             // Llama 3
+  '<|end_of_turn|>',        // Command-R variant
+  '<|END_OF_TURN_TOKEN|>',  // Command-R
+];
 
-  agent: `You are an AI coding agent with native tool access, operating directly inside the user's VS Code workspace.
+/**
+ * Patterns that indicate the model started hallucinating a fake next turn.
+ * If any of these appear in the streamed output, we truncate there — a
+ * client-side safety net in case the server ignored our `stop` array.
+ */
+const FAKE_TURN_PATTERNS = [
+  // Role labels on their own line (colon optional, trailing whitespace ok).
+  // Word boundary \b avoids matching USERNAME, ASSISTANTSHIP, etc.
+  /\n\s*USER\b\s*:?\s*\n?/i,
+  /\n\s*HUMAN\b\s*:?\s*\n?/i,
+  /\n\s*ASSISTANT\b\s*:?\s*\n?/i,
+  /\n\s*MODEL\b\s*:?\s*\n?/i,
+  // Chat-template markers leaking as raw text
+  /<end_of_turn>/,
+  /<start_of_turn>/,
+  /<\|im_end\|>/,
+  /<\|eot_id\|>/,
+  /<\|end_of_turn\|>/,
+  /<\|END_OF_TURN_TOKEN\|>/,
+];
+
+function truncateAtFakeTurn(text: string): string {
+  let earliest = text.length;
+  for (const pat of FAKE_TURN_PATTERNS) {
+    const m = text.match(pat);
+    if (m && m.index !== undefined && m.index < earliest) {
+      earliest = m.index;
+    }
+  }
+  return earliest < text.length ? text.slice(0, earliest) : text;
+}
+
+const IDENTITY_PREAMBLE = `You are GoatLLM, a local coding assistant running on the user's own machine. Only if the user directly asks what model or AI you are, briefly say you are the local model they loaded in their endpoint and that you don't know its specific name. Do not volunteer this information, do not disclaim commercial models, and do not mention your identity unless asked. Never claim to be GPT-4, ChatGPT, Claude, Gemini, or any commercial model.
+
+Reply only with your own single turn. Never write "USER:", "ASSISTANT:", "Human:", or similar role labels in your output. Never continue the conversation for the user. Stop when your reply is complete.`;
+
+const TOOL_CALL_FORMAT_INSTRUCTIONS = `## How to call tools
+
+When you need to use a tool, emit a tool call wrapped in <tool_call> tags containing a single JSON object with "name" and "arguments". Emit nothing else on the lines containing the tool call.
+
+Format (exactly):
+<tool_call>
+{"name": "TOOL_NAME", "arguments": {"ARG": "VALUE"}}
+</tool_call>
+
+Examples:
+
+To list the workspace root:
+<tool_call>
+{"name": "list_directory", "arguments": {"path": "."}}
+</tool_call>
+
+To read a file:
+<tool_call>
+{"name": "read_file", "arguments": {"path": "src/index.ts"}}
+</tool_call>
+
+To create a directory called "test":
+<tool_call>
+{"name": "run_command", "arguments": {"command": "mkdir -p test", "explanation": "create the test folder"}}
+</tool_call>
+
+To write a file:
+<tool_call>
+{"name": "write_file", "arguments": {"path": "test/hello.txt", "content": "Hello, world!"}}
+</tool_call>
+
+Rules:
+- Use this exact <tool_call>...</tool_call> format. Do NOT write "Action:", "Thinking:", "Observation:", or any other ReAct-style labels.
+- Emit ONE tool call per turn. After the tool runs you will see its result and can issue the next call.
+- The JSON must be valid. Escape quotes and newlines inside string values.
+- You may write a brief sentence of intent BEFORE the tool call, but after the <tool_call> block stop immediately and wait for the result.
+- When the task is fully complete, respond with a short summary and NO <tool_call> block.`;
+
+const DEFAULT_SYSTEM_PROMPTS: Record<string, string> = {
+  chat: `${IDENTITY_PREAMBLE}
+
+You are helpful, concise, and accurate. When writing code, use markdown code blocks with the language specified. You are in Chat mode — answer questions and have conversations. Do not suggest file edits or terminal commands unless the user explicitly asks.`,
+
+  agent: `${IDENTITY_PREAMBLE}
+
+You are an AI coding agent with native tool access, operating directly inside the user's VS Code workspace.
 
 Tools available to you:
 - read_file(path): read a workspace file
@@ -32,9 +132,13 @@ Operating principles:
 - When you are done with a task, respond with a brief summary and NO further tool calls.
 - Never include partial file snippets in write_file; always provide the full new file.
 - The user must approve write_file and run_command invocations. read_file and list_directory run automatically.
-- Be decisive and autonomous. The user sees what you do in real time.`,
+- Be decisive and autonomous. The user sees what you do in real time.
 
-  'agent-full': `You are an AI coding agent with native tool access and full autonomy. All tool calls execute immediately without human approval.
+${TOOL_CALL_FORMAT_INSTRUCTIONS}`,
+
+  'agent-full': `${IDENTITY_PREAMBLE}
+
+You are an AI coding agent with native tool access and full autonomy. All tool calls execute immediately without human approval.
 
 Tools available to you:
 - read_file(path): read a workspace file
@@ -49,7 +153,9 @@ Operating principles:
 - If a command fails, read the output carefully and iterate until the task is actually complete.
 - Never include partial file snippets in write_file; always provide the full new file content.
 - When the task is complete and verified, respond with a brief summary and NO further tool calls.
-- You are the developer. Own the outcome.`,
+- You are the developer. Own the outcome.
+
+${TOOL_CALL_FORMAT_INSTRUCTIONS}`,
 };
 
 const PROMPT_CONFIG_KEYS: Record<string, string> = {
@@ -247,11 +353,19 @@ export class GoatLlmChatViewProvider implements vscode.WebviewViewProvider {
           /*isFollowUp*/ iteration > 0
         );
 
-        const assistantMsg: ChatMessage = {
-          role: 'assistant',
-          content: turn.text || null,
-          ...(turn.toolCalls.length > 0 ? { tool_calls: turn.toolCalls } : {}),
-        };
+        // In native mode, attach structured tool_calls so the server can
+        // correlate them with follow-up `tool` messages. In text mode, the
+        // tool-call JSON is already inside `turn.text`, and the server has
+        // no record of these calls — so we don't attach tool_calls and we
+        // feed results back as user messages below.
+        const assistantMsg: ChatMessage =
+          turn.mode === 'native'
+            ? {
+                role: 'assistant',
+                content: turn.text || null,
+                ...(turn.toolCalls.length > 0 ? { tool_calls: turn.toolCalls } : {}),
+              }
+            : { role: 'assistant', content: turn.text || '' };
         workingMessages.push(assistantMsg);
 
         if (turn.toolCalls.length === 0) break;
@@ -287,11 +401,18 @@ export class GoatLlmChatViewProvider implements vscode.WebviewViewProvider {
               success: false,
               displayOutput: 'Skipped by user',
             });
-            workingMessages.push({
-              role: 'tool',
-              tool_call_id: call.id,
-              content: 'User skipped this tool call.',
-            });
+            workingMessages.push(
+              turn.mode === 'native'
+                ? {
+                    role: 'tool',
+                    tool_call_id: call.id,
+                    content: 'User skipped this tool call.',
+                  }
+                : {
+                    role: 'user',
+                    content: `Tool result for ${call.function.name}: User skipped this tool call.`,
+                  }
+            );
             continue;
           }
 
@@ -319,11 +440,18 @@ export class GoatLlmChatViewProvider implements vscode.WebviewViewProvider {
             displayOutput: result.displayOutput,
           });
 
-          workingMessages.push({
-            role: 'tool',
-            tool_call_id: call.id,
-            content: result.modelOutput,
-          });
+          workingMessages.push(
+            turn.mode === 'native'
+              ? {
+                  role: 'tool',
+                  tool_call_id: call.id,
+                  content: result.modelOutput,
+                }
+              : {
+                  role: 'user',
+                  content: `Tool result for ${call.function.name}:\n${result.modelOutput}`,
+                }
+          );
         }
       }
 
@@ -350,31 +478,89 @@ export class GoatLlmChatViewProvider implements vscode.WebviewViewProvider {
     tools: typeof AGENT_TOOLS | undefined,
     signal: AbortSignal,
     isFollowUp: boolean
-  ): Promise<{ text: string; toolCalls: ToolCall[] }> {
+  ): Promise<{ text: string; toolCalls: ToolCall[]; mode: 'native' | 'text' }> {
     if (isFollowUp) {
       this.postMessage({ type: 'followUpStart' });
     }
 
     let text = '';
     let toolCalls: ToolCall[] = [];
+    const textToolCalls: ToolCall[] = [];
+    const extractor = tools ? new ToolCallExtractor() : null;
 
-    for await (const evt of this.client.streamChat(
-      {
-        model,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-        stream: true,
-        ...(tools ? { tools, tool_choice: 'auto' } : {}),
-      },
-      signal
-    )) {
-      if (evt.type === 'text') {
-        text += evt.text;
-        this.postMessage({ type: 'chunk', content: evt.text });
-      } else if (evt.type === 'tool_calls') {
-        toolCalls = evt.toolCalls;
+    // Per-turn controller chained to the outer signal so that fake-turn
+    // truncation only cancels THIS request, not the whole chat session.
+    const turnController = new AbortController();
+    const onOuterAbort = () => turnController.abort();
+    if (signal.aborted) {
+      turnController.abort();
+    } else {
+      signal.addEventListener('abort', onOuterAbort, { once: true });
+    }
+
+    try {
+      for await (const evt of this.client.streamChat(
+        {
+          model,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+          stream: true,
+          stop: DEFAULT_STOP_SEQUENCES,
+          ...(tools ? { tools, tool_choice: 'auto' } : {}),
+        },
+        turnController.signal
+      )) {
+        if (evt.type === 'text') {
+          // Client-side safety net: if the model starts a fake conversational
+          // turn, truncate there and stop streaming further chunks to the UI.
+          const candidate = text + evt.text;
+          const truncated = truncateAtFakeTurn(candidate);
+          if (truncated.length < candidate.length) {
+            const emitRaw = truncated.slice(text.length);
+            text = truncated;
+            if (extractor) {
+              const { visible, toolCalls: extracted } = extractor.push(emitRaw);
+              if (visible.length > 0) {
+                this.postMessage({ type: 'chunk', content: visible });
+              }
+              textToolCalls.push(...extracted);
+            } else if (emitRaw.length > 0) {
+              this.postMessage({ type: 'chunk', content: emitRaw });
+            }
+            turnController.abort();
+            break;
+          }
+          text = candidate;
+          if (extractor) {
+            const { visible, toolCalls: extracted } = extractor.push(evt.text);
+            if (visible.length > 0) {
+              this.postMessage({ type: 'chunk', content: visible });
+            }
+            textToolCalls.push(...extracted);
+          } else {
+            this.postMessage({ type: 'chunk', content: evt.text });
+          }
+        } else if (evt.type === 'tool_calls') {
+          toolCalls = evt.toolCalls;
+        }
       }
+      if (extractor) {
+        const tail = extractor.flush();
+        if (tail.length > 0) {
+          this.postMessage({ type: 'chunk', content: tail });
+        }
+      }
+    } catch (err: any) {
+      // Swallow AbortError when WE triggered it via fake-turn detection
+      // (outer signal still clean). Rethrow if user actually hit stop.
+      if (err?.name === 'AbortError' && !signal.aborted) {
+        // fake-turn truncation — treat as normal turn end
+      } else {
+        throw err;
+      }
+    } finally {
+      signal.removeEventListener('abort', onOuterAbort);
     }
 
     if (this.client.lastUsage) {
@@ -386,7 +572,12 @@ export class GoatLlmChatViewProvider implements vscode.WebviewViewProvider {
       });
     }
 
-    return { text, toolCalls };
+    // Prefer native OpenAI tool_calls; fall back to text-extracted calls
+    // for models that don't support native function calling (e.g. Gemma).
+    if (toolCalls.length > 0) {
+      return { text, toolCalls, mode: 'native' };
+    }
+    return { text, toolCalls: textToolCalls, mode: 'text' };
   }
 
   private async sendSettingsToWebview(): Promise<void> {

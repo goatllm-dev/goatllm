@@ -48,6 +48,7 @@ export interface ChatRequest {
   temperature?: number;
   max_tokens?: number;
   stream?: boolean;
+  stop?: string[];
   tools?: ToolDefinition[];
   tool_choice?: 'auto' | 'none' | 'required';
 }
